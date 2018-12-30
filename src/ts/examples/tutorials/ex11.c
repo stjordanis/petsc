@@ -1525,7 +1525,7 @@ static PetscErrorCode adaptToleranceFVM(PetscFV fvm, TS ts, Vec sol, VecTagger r
   ierr = VecGetArrayRead(cellGeom,&pointGeom);CHKERRQ(ierr);
   ierr = VecGetArrayRead(locX,&pointVals);CHKERRQ(ierr);
   ierr = VecGetDM(cellGeom,&cellDM);CHKERRQ(ierr);
-  ierr = DMLabelCreate("adapt",&adaptLabel);CHKERRQ(ierr);
+  ierr = DMLabelCreate(PETSC_COMM_SELF,"adapt",&adaptLabel);CHKERRQ(ierr);
   ierr = VecCreateMPI(PetscObjectComm((PetscObject)plex),cEnd-cStart,PETSC_DETERMINE,&errVec);CHKERRQ(ierr);
   ierr = VecSetUp(errVec);CHKERRQ(ierr);
   ierr = VecGetArray(errVec,&errArray);CHKERRQ(ierr);
@@ -1820,7 +1820,7 @@ int main(int argc, char **argv)
 
     ierr = PetscOptionsBegin(comm, "", "Mesh conversion options", "DMPLEX");CHKERRQ(ierr);
     ierr = PetscOptionsFList("-dm_type","Convert DMPlex to another format","ex12",DMList,DMPLEX,convType,256,&flg);CHKERRQ(ierr);
-    ierr = PetscOptionsEnd();
+    ierr = PetscOptionsEnd();CHKERRQ(ierr);
     if (flg) {
       DM dmConv;
 
