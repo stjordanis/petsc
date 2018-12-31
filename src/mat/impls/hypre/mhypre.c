@@ -1172,6 +1172,13 @@ static PetscErrorCode MatHYPRESetPreallocation_HYPRE(Mat A, PetscInt dnz, const 
     ierr = PetscFree(honnz);CHKERRQ(ierr);
   }
   A->preallocated = PETSC_TRUE;
+
+  /* SetDiagOffdSizes sets hypre_AuxParCSRMatrixNeedAux(aux_matrix) = 0 */
+  {
+    hypre_AuxParCSRMatrix *aux_matrix;
+    aux_matrix = (hypre_AuxParCSRMatrix*)hypre_IJMatrixTranslator(hA->ij);
+    hypre_AuxParCSRMatrixNeedAux(aux_matrix) = 1;
+  }
   PetscFunctionReturn(0);
 }
 
