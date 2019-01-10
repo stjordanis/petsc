@@ -4,6 +4,9 @@
 #error "PETSc needs HDF5 version >= 1.8.0"
 #endif
 
+static PetscErrorCode PetscViewerHDF5Traverse_Internal(PetscViewer, const char[], PetscBool, PetscBool*, H5O_type_t*);
+static PetscErrorCode PetscViewerHDF5HasAttribute_Internal(PetscViewer, const char[], const char[], PetscBool*);
+
 typedef struct GroupList {
   const char       *name;
   struct GroupList *next;
@@ -29,6 +32,37 @@ struct _n_HDF5ReadCtx {
   PetscBool complexVal, dim2, horizontal;
 };
 typedef struct _n_HDF5ReadCtx* HDF5ReadCtx;
+
+static PetscErrorCode PetscViewerHDF5GetAbsolutePath_Internal(PetscViewer viewer, const char objname[], char **fullpath)
+{
+  const char *group;
+  char buf[PETSC_MAX_PATH_LEN]="";
+  PetscErrorCode ierr;
+
+  PetscFunctionBegin;
+  ierr = PetscViewerHDF5GetGroup(viewer, &group);CHKERRQ(ierr);
+  ierr = PetscStrcat(buf, group);CHKERRQ(ierr);
+  ierr = PetscStrcat(buf, "/");CHKERRQ(ierr);
+  ierr = PetscStrcat(buf, objname);CHKERRQ(ierr);
+  ierr = PetscStrallocpy(buf, fullpath);CHKERRQ(ierr);
+  PetscFunctionReturn(0);
+}
+
+static PetscErrorCode PetscViewerHDF5CheckNamedObject_Internal(PetscViewer viewer, PetscObject obj)
+{
+  PetscBool has;
+  const char *group;
+  PetscErrorCode ierr;
+
+  PetscFunctionBegin;
+  if (!obj->name) SETERRQ(PetscObjectComm((PetscObject)viewer), PETSC_ERR_ARG_WRONG, "Object must be named");
+  ierr = PetscViewerHDF5HasObject(viewer, obj, &has);CHKERRQ(ierr);
+  if (!has) {
+    ierr = PetscViewerHDF5GetGroup(viewer, &group);CHKERRQ(ierr);
+    SETERRQ2(PetscObjectComm((PetscObject)viewer), PETSC_ERR_FILE_UNEXPECTED, "Object (dataset) %s not stored in group %s", obj->name, group);
+  }
+  PetscFunctionReturn(0);
+}
 
 static PetscErrorCode PetscViewerSetFromOptions_HDF5(PetscOptionItems *PetscOptionsObject,PetscViewer v)
 {
@@ -779,28 +813,30 @@ PetscErrorCode PetscHDF5DataTypeToPetscDataType(hid_t htype, PetscDataType *ptyp
 
   Input Parameters:
 + viewer - The HDF5 viewer
-. parent - The parent name
+. dataset - The parent dataset name, relative to the current group. NULL means a group-wise attribute.
 . name   - The attribute name
 . datatype - The attribute type
 - value    - The attribute value
 
   Level: advanced
 
-.seealso: PetscViewerHDF5Open(), PetscViewerHDF5ReadAttribute(), PetscViewerHDF5HasAttribute()
+.seealso: PetscViewerHDF5Open(), PetscViewerHDF5WriteObjectAttribute(), PetscViewerHDF5ReadAttribute(), PetscViewerHDF5HasAttribute(), PetscViewerHDF5PushGroup(),PetscViewerHDF5PopGroup(),PetscViewerHDF5GetGroup()
 @*/
-PetscErrorCode PetscViewerHDF5WriteAttribute(PetscViewer viewer, const char parent[], const char name[], PetscDataType datatype, const void *value)
+PetscErrorCode PetscViewerHDF5WriteAttribute(PetscViewer viewer, const char dataset[], const char name[], PetscDataType datatype, const void *value)
 {
+  char           *parent;
   hid_t          h5, dataspace, obj, attribute, dtype;
   PetscBool      has;
   PetscErrorCode ierr;
 
   PetscFunctionBegin;
   PetscValidHeaderSpecific(viewer,PETSC_VIEWER_CLASSID,1);
-  PetscValidPointer(parent, 2);
-  PetscValidPointer(name, 3);
-  PetscValidPointer(value, 4);
-
-  ierr = PetscViewerHDF5HasAttribute(viewer, parent, name, &has);CHKERRQ(ierr);
+  if (dataset) PetscValidCharPointer(dataset, 2);
+  PetscValidCharPointer(name, 3);
+  PetscValidPointer(value, 5);
+  ierr = PetscViewerHDF5GetAbsolutePath_Internal(viewer, dataset, &parent);CHKERRQ(ierr);
+  ierr = PetscViewerHDF5Traverse_Internal(viewer, parent, PETSC_TRUE, NULL, NULL);CHKERRQ(ierr);
+  ierr = PetscViewerHDF5HasAttribute_Internal(viewer, parent, name, &has);CHKERRQ(ierr);
   ierr = PetscDataTypeToHDF5DataType(datatype, &dtype);CHKERRQ(ierr);
   if (datatype == PETSC_STRING) {
     size_t len;
@@ -820,6 +856,39 @@ PetscErrorCode PetscViewerHDF5WriteAttribute(PetscViewer viewer, const char pare
   PetscStackCallHDF5(H5Aclose,(attribute));
   PetscStackCallHDF5(H5Oclose,(obj));
   PetscStackCallHDF5(H5Sclose,(dataspace));
+  ierr = PetscFree(parent);CHKERRQ(ierr);
+  PetscFunctionReturn(0);
+}
+
+/*@C
+ PetscViewerHDF5WriteObjectAttribute - Write an attribute to the dataset matching the given PetscObject by name
+
+  Input Parameters:
++ viewer   - The HDF5 viewer
+. obj      - The object whose name is used to lookup the parent dataset, relative to the current group.
+. name     - The attribute name
+. datatype - The attribute type
+- value    - The attribute value
+
+  Notes:
+  This fails if current_group/object_name doesn't resolve to a dataset (the path doesn't exist or is not a dataset).
+  You might want to check first if it does using PetscViewerHDF5HasObject().
+
+  Level: advanced
+
+.seealso: PetscViewerHDF5Open(), PetscViewerHDF5WriteAttribute(), PetscViewerHDF5ReadObjectAttribute(), PetscViewerHDF5HasObjectAttribute(), PetscViewerHDF5HasObject(), PetscViewerHDF5PushGroup(),PetscViewerHDF5PopGroup(),PetscViewerHDF5GetGroup()
+@*/
+PetscErrorCode PetscViewerHDF5WriteObjectAttribute(PetscViewer viewer, PetscObject obj, const char name[], PetscDataType datatype, const void *value)
+{
+  PetscErrorCode ierr;
+
+  PetscFunctionBegin;
+  PetscValidHeaderSpecific(viewer,PETSC_VIEWER_CLASSID,1);
+  PetscValidHeader(obj,2);
+  PetscValidCharPointer(name,3);
+  PetscValidPointer(value,5);
+  ierr = PetscViewerHDF5CheckNamedObject_Internal(viewer, obj);CHKERRQ(ierr);
+  ierr = PetscViewerHDF5WriteAttribute(viewer, obj->name, name, datatype, value);CHKERRQ(ierr);
   PetscFunctionReturn(0);
 }
 
@@ -828,7 +897,7 @@ PetscErrorCode PetscViewerHDF5WriteAttribute(PetscViewer viewer, const char pare
 
   Input Parameters:
 + viewer - The HDF5 viewer
-. parent - The parent name
+. dataset - The parent dataset name, relative to the current group. NULL means a group-wise attribute.
 . name   - The attribute name
 - datatype - The attribute type
 
@@ -837,18 +906,24 @@ PetscErrorCode PetscViewerHDF5WriteAttribute(PetscViewer viewer, const char pare
 
   Level: advanced
 
-.seealso: PetscViewerHDF5Open(), PetscViewerHDF5WriteAttribute(), PetscViewerHDF5HasAttribute()
+.seealso: PetscViewerHDF5Open(), PetscViewerHDF5ReadObjectAttribute(), PetscViewerHDF5WriteAttribute(), PetscViewerHDF5HasAttribute(), PetscViewerHDF5HasObject(), PetscViewerHDF5PushGroup(),PetscViewerHDF5PopGroup(),PetscViewerHDF5GetGroup()
 @*/
-PetscErrorCode PetscViewerHDF5ReadAttribute(PetscViewer viewer, const char parent[], const char name[], PetscDataType datatype, void *value)
+PetscErrorCode PetscViewerHDF5ReadAttribute(PetscViewer viewer, const char dataset[], const char name[], PetscDataType datatype, void *value)
 {
+  char           *parent;
   hid_t          h5, obj, attribute, atype, dtype;
+  PetscBool      has;
   PetscErrorCode ierr;
 
   PetscFunctionBegin;
   PetscValidHeaderSpecific(viewer,PETSC_VIEWER_CLASSID,1);
-  PetscValidPointer(parent, 2);
-  PetscValidPointer(name, 3);
-  PetscValidPointer(value, 4);
+  if (dataset) PetscValidCharPointer(dataset, 2);
+  PetscValidCharPointer(name, 3);
+  PetscValidPointer(value, 5);
+  ierr = PetscViewerHDF5GetAbsolutePath_Internal(viewer, dataset, &parent);CHKERRQ(ierr);
+  ierr = PetscViewerHDF5Traverse_Internal(viewer, parent, PETSC_FALSE, &has, NULL);CHKERRQ(ierr);
+  if (has) {ierr = PetscViewerHDF5HasAttribute_Internal(viewer, parent, name, &has);CHKERRQ(ierr);}
+  if (!has) SETERRQ2(PetscObjectComm((PetscObject)viewer), PETSC_ERR_FILE_UNEXPECTED, "Attribute %s/%s does not exist", parent, name);
   ierr = PetscDataTypeToHDF5DataType(datatype, &dtype);CHKERRQ(ierr);
   ierr = PetscViewerHDF5GetFileId(viewer, &h5);CHKERRQ(ierr);
   PetscStackCallHDF5Return(obj,H5Oopen,(h5, parent, H5P_DEFAULT));
@@ -864,34 +939,150 @@ PetscErrorCode PetscViewerHDF5ReadAttribute(PetscViewer viewer, const char paren
   PetscStackCallHDF5(H5Aclose,(attribute));
   /* H5Oclose can be used to close groups, datasets, or committed datatypes */
   PetscStackCallHDF5(H5Oclose,(obj));
+  ierr = PetscFree(parent);CHKERRQ(ierr);
   PetscFunctionReturn(0);
 }
 
-static PetscErrorCode PetscViewerHDF5HasObject_Internal(PetscViewer viewer, const char name[], H5O_type_t otype, PetscBool *has)
+/*@C
+ PetscViewerHDF5ReadObjectAttribute - Read an attribute from the dataset matching the given PetscObject by name
+
+  Input Parameters:
++ viewer   - The HDF5 viewer
+. obj      - The object whose name is used to lookup the parent dataset, relative to the current group.
+. name     - The attribute name
+- datatype - The attribute type
+
+  Output Parameter:
+. value    - The attribute value
+
+  Notes:
+  This fails if current_group/object_name doesn't resolve to a dataset (the path doesn't exist or is not a dataset).
+  You might want to check first if it does using PetscViewerHDF5HasObject().
+
+  Level: advanced
+
+.seealso: PetscViewerHDF5Open(), PetscViewerHDF5ReadAttribute() PetscViewerHDF5WriteObjectAttribute(), PetscViewerHDF5HasObjectAttribute(), PetscViewerHDF5PushGroup(),PetscViewerHDF5PopGroup(),PetscViewerHDF5GetGroup()
+@*/
+PetscErrorCode PetscViewerHDF5ReadObjectAttribute(PetscViewer viewer, PetscObject obj, const char name[], PetscDataType datatype, void *value)
 {
-  hid_t          h5;
   PetscErrorCode ierr;
 
   PetscFunctionBegin;
   PetscValidHeaderSpecific(viewer,PETSC_VIEWER_CLASSID,1);
-  PetscValidPointer(name, 2);
-  PetscValidPointer(has, 3);
-  *has = PETSC_FALSE;
-  ierr = PetscViewerHDF5GetFileId(viewer, &h5);CHKERRQ(ierr);
-  if (H5Lexists(h5, name, H5P_DEFAULT)) {
-    H5O_info_t info;
-    hid_t      obj;
+  PetscValidHeader(obj,2);
+  PetscValidCharPointer(name,3);
+  PetscValidPointer(value, 5);
+  ierr = PetscViewerHDF5CheckNamedObject_Internal(viewer, obj);CHKERRQ(ierr);
+  ierr = PetscViewerHDF5ReadAttribute(viewer, obj->name, name, datatype, value);CHKERRQ(ierr);
+  PetscFunctionReturn(0);
+}
 
-    PetscStackCallHDF5Return(obj,H5Oopen,(h5, name, H5P_DEFAULT));
-    PetscStackCallHDF5(H5Oget_info,(obj, &info));
-    if (otype == info.type) *has = PETSC_TRUE;
-    PetscStackCallHDF5(H5Oclose,(obj));
+PETSC_STATIC_INLINE PetscErrorCode PetscViewerHDF5Traverse_Inner_Internal(hid_t h5, const char name[], PetscBool createGroup, PetscBool *exists_)
+{
+  htri_t exists;
+  hid_t group;
+
+  PetscFunctionBegin;
+  PetscStackCallHDF5Return(exists,H5Lexists,(h5, name, H5P_DEFAULT));
+  if (exists) PetscStackCallHDF5Return(exists,H5Oexists_by_name,(h5, name, H5P_DEFAULT));
+  if (!exists && createGroup) {
+    PetscStackCallHDF5Return(group,H5Gcreate2,(h5, name, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+    PetscStackCallHDF5(H5Gclose,(group));
+    exists = PETSC_TRUE;
   }
+  *exists_ = (PetscBool) exists;
+  PetscFunctionReturn(0);
+}
+
+static PetscErrorCode PetscViewerHDF5Traverse_Internal(PetscViewer viewer, const char name[], PetscBool createGroup, PetscBool *has, H5O_type_t *otype)
+{
+  hid_t          h5;
+  PetscBool      exists;
+  PetscInt       i,n;
+  char           **hierarchy;
+  char           buf[PETSC_MAX_PATH_LEN]="";
+  PetscErrorCode ierr;
+
+  PetscFunctionBegin;
+  PetscValidHeaderSpecific(viewer,PETSC_VIEWER_CLASSID,1);
+  PetscValidCharPointer(name, 2);
+  if (has) {
+    PetscValidIntPointer(has, 3);
+    *has = PETSC_FALSE;
+  }
+  if (otype) {
+    PetscValidIntPointer(otype, 4);
+    *otype = H5O_TYPE_UNKNOWN;
+  }
+  ierr = PetscViewerHDF5GetFileId(viewer, &h5);CHKERRQ(ierr);
+
+  /*
+     Unfortunately, H5Oexists_by_name() fails if any object in hierarchy is missing.
+     Hence, each of them needs to be tested separately:
+     1) whether it's a valid link
+     2) whether this link resolves to an object
+     See H5Oexists_by_name() documentation.
+  */
+  ierr = PetscStrToArray(name,'/',&n,&hierarchy);CHKERRQ(ierr);
+  if (!n) {
+    /*  Assume group "/" always exists in accordance with HDF5 >= 1.10.0. See H5Lexists() documentation. */
+    if (has)   *has   = PETSC_TRUE;
+    if (otype) *otype = H5O_TYPE_GROUP;
+    ierr = PetscStrToArrayDestroy(n,hierarchy);CHKERRQ(ierr);
+    PetscFunctionReturn(0);
+  }
+  for (i=0; i<n; i++) {
+    ierr = PetscStrcat(buf,"/");CHKERRQ(ierr);
+    ierr = PetscStrcat(buf,hierarchy[i]);CHKERRQ(ierr);
+    ierr = PetscViewerHDF5Traverse_Inner_Internal(h5, buf, createGroup, &exists);CHKERRQ(ierr);
+    if (!exists) break;
+  }
+  ierr = PetscStrToArrayDestroy(n,hierarchy);CHKERRQ(ierr);
+
+  /* If the object exists, get its type */
+  if (exists && otype) {
+    H5O_info_t info;
+
+    PetscStackCallHDF5(H5Oget_info_by_name,(h5, name, &info, H5P_DEFAULT));
+    *otype = info.type;
+  }
+  if (has) *has = exists;
   PetscFunctionReturn(0);
 }
 
 /*@
- PetscViewerHDF5HasObject - Check whether a dataset with the same name as given object exists in the HDF5 file
+ PetscViewerHDF5HasGroup - Check whether the current (pushed) group exists in the HDF5 file
+
+  Input Parameters:
+. viewer - The HDF5 viewer
+
+  Output Parameter:
+. has    - Flag for group existence
+
+  Notes:
+  If the path exists but is not a group, this returns PETSC_FALSE as well.
+
+  Level: advanced
+
+.seealso: PetscViewerHDF5Open(), PetscViewerHDF5PushGroup(), PetscViewerHDF5PopGroup(), PetscViewerHDF5OpenGroup()
+@*/
+PetscErrorCode PetscViewerHDF5HasGroup(PetscViewer viewer, PetscBool *has)
+{
+  H5O_type_t type;
+  const char *name;
+  PetscErrorCode ierr;
+
+  PetscFunctionBegin;
+  PetscValidHeaderSpecific(viewer,PETSC_VIEWER_CLASSID,1);
+  PetscValidIntPointer(has,2);
+  ierr = PetscViewerHDF5GetGroup(viewer, &name);CHKERRQ(ierr);
+  ierr = PetscViewerHDF5Traverse_Internal(viewer, name, PETSC_FALSE, has, &type);CHKERRQ(ierr);
+  *has = (type == H5O_TYPE_GROUP) ? PETSC_TRUE : PETSC_FALSE;
+  PetscFunctionReturn(0);
+}
+
+/*@
+ PetscViewerHDF5HasObject - Check whether a dataset with the same name as given object exists in the HDF5 file under current group
 
   Input Parameters:
 + viewer - The HDF5 viewer
@@ -900,17 +1091,29 @@ static PetscErrorCode PetscViewerHDF5HasObject_Internal(PetscViewer viewer, cons
   Output Parameter:
 . has    - Flag for dataset existence; PETSC_FALSE for unnamed object
 
+  Notes:
+  If the path exists but is not a dataset, this returns PETSC_FALSE as well.
+
   Level: advanced
 
-.seealso: PetscViewerHDF5Open(), PetscViewerHDF5HasAttribute()
+.seealso: PetscViewerHDF5Open(), PetscViewerHDF5HasAttribute(), PetscViewerHDF5PushGroup(),PetscViewerHDF5PopGroup(),PetscViewerHDF5GetGroup()
 @*/
 PetscErrorCode PetscViewerHDF5HasObject(PetscViewer viewer, PetscObject obj, PetscBool *has)
 {
+  H5O_type_t type;
+  char *path;
   PetscErrorCode ierr;
 
   PetscFunctionBegin;
+  PetscValidHeaderSpecific(viewer,PETSC_VIEWER_CLASSID,1);
+  PetscValidHeader(obj,2);
+  PetscValidIntPointer(has,3);
   *has = PETSC_FALSE;
-  if (obj->name) {ierr = PetscViewerHDF5HasObject_Internal(viewer, obj->name, H5O_TYPE_DATASET, has);CHKERRQ(ierr);}
+  if (!obj->name) PetscFunctionReturn(0);
+  ierr = PetscViewerHDF5GetAbsolutePath_Internal(viewer, obj->name, &path);CHKERRQ(ierr);
+  ierr = PetscViewerHDF5Traverse_Internal(viewer, path, PETSC_FALSE, has, &type);CHKERRQ(ierr);
+  *has = (type == H5O_TYPE_DATASET) ? PETSC_TRUE : PETSC_FALSE;
+  ierr = PetscFree(path);CHKERRQ(ierr);
   PetscFunctionReturn(0);
 }
 
@@ -919,7 +1122,7 @@ PetscErrorCode PetscViewerHDF5HasObject(PetscViewer viewer, PetscObject obj, Pet
 
   Input Parameters:
 + viewer - The HDF5 viewer
-. parent - The parent name
+. dataset - The parent dataset name, relative to the current group. NULL means a group-wise attribute.
 - name   - The attribute name
 
   Output Parameter:
@@ -927,37 +1130,74 @@ PetscErrorCode PetscViewerHDF5HasObject(PetscViewer viewer, PetscObject obj, Pet
 
   Level: advanced
 
-.seealso: PetscViewerHDF5Open(), PetscViewerHDF5WriteAttribute(), PetscViewerHDF5ReadAttribute(), PetscViewerHDF5HasObject()
+.seealso: PetscViewerHDF5Open(), PetscViewerHDF5HasObjectAttribute(), PetscViewerHDF5WriteAttribute(), PetscViewerHDF5ReadAttribute(), PetscViewerHDF5PushGroup(),PetscViewerHDF5PopGroup(),PetscViewerHDF5GetGroup()
 @*/
-PetscErrorCode PetscViewerHDF5HasAttribute(PetscViewer viewer, const char parent[], const char name[], PetscBool *has)
+PetscErrorCode PetscViewerHDF5HasAttribute(PetscViewer viewer, const char dataset[], const char name[], PetscBool *has)
 {
-  hid_t          h5, dataset;
-  htri_t         hhas;
-  PetscBool      exists;
+  char           *parent;
   PetscErrorCode ierr;
 
   PetscFunctionBegin;
   PetscValidHeaderSpecific(viewer,PETSC_VIEWER_CLASSID,1);
-  PetscValidPointer(parent, 2);
-  PetscValidPointer(name, 3);
-  PetscValidPointer(has, 4);
-  *has = PETSC_FALSE;
+  if (dataset) PetscValidCharPointer(dataset,2);
+  PetscValidCharPointer(name,3);
+  PetscValidIntPointer(has,4);
+  ierr = PetscViewerHDF5GetAbsolutePath_Internal(viewer, dataset, &parent);CHKERRQ(ierr);
+  ierr = PetscViewerHDF5Traverse_Internal(viewer, parent, PETSC_FALSE, has, NULL);CHKERRQ(ierr);
+  if (*has) {ierr = PetscViewerHDF5HasAttribute_Internal(viewer, parent, name, has);CHKERRQ(ierr);}
+  ierr = PetscFree(parent);CHKERRQ(ierr);
+  PetscFunctionReturn(0);
+}
+
+/*@C
+ PetscViewerHDF5HasObjectAttribute - Check whether an attribute is attached to the dataset matching the given PetscObject by name
+
+  Input Parameters:
++ viewer - The HDF5 viewer
+. obj    - The object whose name is used to lookup the parent dataset, relative to the current group.
+- name   - The attribute name
+
+  Output Parameter:
+. has    - Flag for attribute existence
+
+  Notes:
+  This fails if current_group/object_name doesn't resolve to a dataset (the path doesn't exist or is not a dataset).
+  You might want to check first if it does using PetscViewerHDF5HasObject().
+
+  Level: advanced
+
+.seealso: PetscViewerHDF5Open(), PetscViewerHDF5HasAttribute(), PetscViewerHDF5WriteObjectAttribute(), PetscViewerHDF5ReadObjectAttribute(), PetscViewerHDF5HasObject(), PetscViewerHDF5PushGroup(),PetscViewerHDF5PopGroup(),PetscViewerHDF5GetGroup()
+@*/
+PetscErrorCode PetscViewerHDF5HasObjectAttribute(PetscViewer viewer, PetscObject obj, const char name[], PetscBool *has)
+{
+  PetscErrorCode ierr;
+
+  PetscFunctionBegin;
+  PetscValidHeaderSpecific(viewer,PETSC_VIEWER_CLASSID,1);
+  PetscValidHeader(obj,2);
+  PetscValidCharPointer(name,3);
+  PetscValidIntPointer(has,4);
+  ierr = PetscViewerHDF5CheckNamedObject_Internal(viewer, obj);CHKERRQ(ierr);
+  ierr = PetscViewerHDF5HasAttribute(viewer, obj->name, name, has);CHKERRQ(ierr);
+  PetscFunctionReturn(0);
+}
+
+static PetscErrorCode PetscViewerHDF5HasAttribute_Internal(PetscViewer viewer, const char parent[], const char name[], PetscBool *has)
+{
+  hid_t          h5;
+  htri_t         hhas;
+  PetscErrorCode ierr;
+
+  PetscFunctionBegin;
   ierr = PetscViewerHDF5GetFileId(viewer, &h5);CHKERRQ(ierr);
-  ierr = PetscViewerHDF5HasObject_Internal(viewer, parent, H5O_TYPE_DATASET, &exists);CHKERRQ(ierr);
-  if (exists) {
-    PetscStackCallHDF5Return(dataset, H5Dopen2, (h5, parent, H5P_DEFAULT));
-    PetscStackCallHDF5Return(hhas, H5Aexists, (dataset, name));
-    PetscStackCallHDF5(H5Dclose,(dataset));
-    *has = hhas ? PETSC_TRUE : PETSC_FALSE;
-  }
+  PetscStackCallHDF5Return(hhas,H5Aexists_by_name,(h5, parent, name, H5P_DEFAULT));
+  *has = hhas ? PETSC_TRUE : PETSC_FALSE;
   PetscFunctionReturn(0);
 }
 
 static PetscErrorCode PetscViewerHDF5ReadInitialize_Private(PetscViewer viewer, const char name[], HDF5ReadCtx *ctx)
 {
   HDF5ReadCtx    h=NULL;
-  const char    *groupname=NULL;
-  char           vecgroup[PETSC_MAX_PATH_LEN];
   PetscErrorCode ierr;
 
   PetscFunctionBegin;
@@ -966,11 +1206,9 @@ static PetscErrorCode PetscViewerHDF5ReadInitialize_Private(PetscViewer viewer, 
   PetscStackCallHDF5Return(h->dataset,H5Dopen2,(h->group, name, H5P_DEFAULT));
   PetscStackCallHDF5Return(h->dataspace,H5Dget_space,(h->dataset));
   ierr = PetscViewerHDF5GetTimestep(viewer, &h->timestep);CHKERRQ(ierr);
-  ierr = PetscViewerHDF5GetGroup(viewer,&groupname);CHKERRQ(ierr);
-  ierr = PetscSNPrintf(vecgroup,PETSC_MAX_PATH_LEN,"%s/%s",groupname ? groupname : "",name);CHKERRQ(ierr);
-  ierr = PetscViewerHDF5HasAttribute(viewer,vecgroup,"complex",&h->complexVal);CHKERRQ(ierr);
+  ierr = PetscViewerHDF5HasAttribute(viewer,name,"complex",&h->complexVal);CHKERRQ(ierr);
   /* MATLAB stores column vectors horizontally */
-  ierr = PetscViewerHDF5HasAttribute(viewer,vecgroup,"MATLAB_class",&h->horizontal);CHKERRQ(ierr);
+  ierr = PetscViewerHDF5HasAttribute(viewer,name,"MATLAB_class",&h->horizontal);CHKERRQ(ierr);
   /* Create property list for collective dataset read */
   PetscStackCallHDF5Return(h->plist,H5Pcreate,(H5P_DATASET_XFER));
 #if defined(PETSC_HAVE_H5PSET_FAPL_MPIO)
