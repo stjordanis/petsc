@@ -1118,7 +1118,6 @@ static PetscErrorCode MatHYPRESetPreallocation_HYPRE(Mat A, PetscInt dnz, const 
   PetscInt           i,rs,re,cs,ce,bs;
   PetscMPIInt        size;
   PetscErrorCode     ierr;
-  PetscBool          nooffprocentries;
 
   PetscFunctionBegin;
   ierr = MatGetBlockSize(A,&bs);CHKERRQ(ierr);
@@ -1137,10 +1136,7 @@ static PetscErrorCode MatHYPRESetPreallocation_HYPRE(Mat A, PetscInt dnz, const 
     if (hre-hrs+1 != re -rs) SETERRQ4(PETSC_COMM_SELF,PETSC_ERR_PLIB,"Inconsistent local rows: IJMatrix [%D,%D), PETSc [%D,%d)",hrs,hre+1,rs,re);
     if (hce-hcs+1 != ce -cs) SETERRQ4(PETSC_COMM_SELF,PETSC_ERR_PLIB,"Inconsistent local cols: IJMatrix [%D,%D), PETSc [%D,%d)",hcs,hce+1,cs,ce);
   }
-  ierr = MatGetOption(A, MAT_NO_OFF_PROC_ENTRIES, &nooffprocentries);CHKERRQ(ierr);
-  if (nooffprocentries) {
-    PetscStackCallStandard(HYPRE_IJMatrixSetMaxOffProcElmts,(hA->ij,0));
-  }
+  PetscStackCallStandard(HYPRE_IJMatrixInitialize,(hA->ij));
 
   if (dnz == PETSC_DEFAULT || dnz == PETSC_DECIDE) dnz = 10*bs;
   if (onz == PETSC_DEFAULT || onz == PETSC_DECIDE) onz = 10*bs;
@@ -1164,7 +1160,6 @@ static PetscErrorCode MatHYPRESetPreallocation_HYPRE(Mat A, PetscInt dnz, const 
     honnz = NULL;
     PetscStackCallStandard(HYPRE_IJMatrixSetRowSizes,(hA->ij,hdnnz));
   }
-  PetscStackCallStandard(HYPRE_IJMatrixInitialize,(hA->ij));
   if (!dnnz) {
     ierr = PetscFree(hdnnz);CHKERRQ(ierr);
   }
@@ -1172,6 +1167,13 @@ static PetscErrorCode MatHYPRESetPreallocation_HYPRE(Mat A, PetscInt dnz, const 
     ierr = PetscFree(honnz);CHKERRQ(ierr);
   }
   A->preallocated = PETSC_TRUE;
+
+  /* SetDiagOffdSizes sets hypre_AuxParCSRMatrixNeedAux(aux_matrix) = 0 */
+  {
+    hypre_AuxParCSRMatrix *aux_matrix;
+    aux_matrix = (hypre_AuxParCSRMatrix*)hypre_IJMatrixTranslator(hA->ij);
+    hypre_AuxParCSRMatrixNeedAux(aux_matrix) = 1;
+  }
   PetscFunctionReturn(0);
 }
 
