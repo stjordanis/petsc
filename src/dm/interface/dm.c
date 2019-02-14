@@ -4636,7 +4636,7 @@ PetscErrorCode DMSetRegionDS(DM dm, DMLabel label, PetscDS ds)
       PetscFunctionReturn(0);
     }
   }
-  ierr = DMDSEnlarge_Static(dm, Nds+1);
+  ierr = DMDSEnlarge_Static(dm, Nds+1);CHKERRQ(ierr);
   ierr = PetscObjectReference((PetscObject) label);CHKERRQ(ierr);
   ierr = PetscObjectReference((PetscObject) ds);CHKERRQ(ierr);
   if (!label) {
