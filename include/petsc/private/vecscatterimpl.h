@@ -283,8 +283,11 @@ PETSC_STATIC_INLINE PetscErrorCode VecScatterMemcpyPlanExecute_Scatter(PetscInt 
   PetscFunctionReturn(0);
 }
 
-PETSC_INTERN PetscErrorCode VecScatterGetTypes_Private(VecScatter,VecScatterFormat*,VecScatterFormat*);
-PETSC_INTERN PetscErrorCode VecScatterIsSequential_Private(VecScatter_Common*,PetscBool*);
+PETSC_INTERN PetscErrorCode VecScatterGetRemoteCount_Private(const VecScatter,PetscBool,PetscInt*,PetscInt*);
+PETSC_INTERN PetscErrorCode VecScatterGetRemote_Private(const VecScatter,PetscBool,PetscInt*,const PetscInt**,const PetscInt**,const PetscMPIInt**,PetscInt*);
+PETSC_INTERN PetscErrorCode VecScatterGetRemoteOrdered_Private(const VecScatter,PetscBool,PetscInt*,const PetscInt**,const PetscInt**,const PetscMPIInt**,PetscInt*);
+PETSC_INTERN PetscErrorCode VecScatterRestoreRemote_Private(const VecScatter,PetscBool,PetscInt*,const PetscInt**,const PetscInt**,const PetscMPIInt**,PetscInt*);
+PETSC_INTERN PetscErrorCode VecScatterRestoreRemoteOrdered_Private(const VecScatter,PetscBool,PetscInt*,const PetscInt**,const PetscInt**,const PetscMPIInt**,PetscInt*);
 
 typedef struct _VecScatterOps *VecScatterOps;
 struct _VecScatterOps {
@@ -295,8 +298,13 @@ struct _VecScatterOps {
   PetscErrorCode (*setup)(VecScatter);
   PetscErrorCode (*view)(VecScatter,PetscViewer);
   PetscErrorCode (*viewfromoptions)(VecScatter,const char prefix[],const char name[]);
-  PetscErrorCode (*remap)(VecScatter,PetscInt *,PetscInt*);
+  PetscErrorCode (*remap)(VecScatter,const PetscInt *,const PetscInt*);
   PetscErrorCode (*getmerged)(VecScatter,PetscBool *);
+  PetscErrorCode (*getremotecount)(const VecScatter,PetscBool,PetscInt*,PetscInt*);
+  PetscErrorCode (*getremote)(const VecScatter,PetscBool,PetscInt*,const PetscInt**,const PetscInt**,const PetscMPIInt**,PetscInt*);
+  PetscErrorCode (*getremoteordered)(const VecScatter,PetscBool,PetscInt*,const PetscInt**,const PetscInt**,const PetscMPIInt**,PetscInt*);
+  PetscErrorCode (*restoreremote)(const VecScatter,PetscBool,PetscInt*,const PetscInt**,const PetscInt**,const PetscMPIInt**,PetscInt*);
+  PetscErrorCode (*restoreremoteordered)(const VecScatter,PetscBool,PetscInt*,const PetscInt**,const PetscInt**,const PetscMPIInt**,PetscInt*);
 };
 
 struct _p_VecScatter {
@@ -309,12 +317,15 @@ struct _p_VecScatter {
   PetscBool      is_duplicate;         /* IS has duplicate indices, would cause writing error in the case StoP of VecScatterEndMPI3Node */
   Vec            to_v,from_v;          /* used in VecScatterCreateWithData() and VecScatterSetData() */
   IS             to_is,from_is;        /* used in VecScatterCreateWithData() and VecScatterSetData() */
+
+  void           *data;                /* implementation specific data */
 };
 
 PETSC_INTERN PetscErrorCode VecScatterCreate_Seq(VecScatter);
 PETSC_INTERN PetscErrorCode VecScatterCreate_MPI1(VecScatter);
 PETSC_INTERN PetscErrorCode VecScatterCreate_MPI3(VecScatter);
 PETSC_INTERN PetscErrorCode VecScatterCreate_MPI3Node(VecScatter);
+PETSC_INTERN PetscErrorCode VecScatterCreate_SF(VecScatter);
 
 PETSC_INTERN PetscErrorCode VecScatterSetUp_vectype_private(VecScatter,PetscErrorCode (*)(PetscInt,const PetscInt*,PetscInt,const PetscInt*,Vec,Vec,PetscInt,VecScatter),PetscErrorCode (*)(PetscInt,const PetscInt*,PetscInt,const PetscInt*,Vec,Vec,PetscInt,VecScatter),PetscErrorCode (*)(PetscInt,const PetscInt*,PetscInt,const PetscInt*,Vec,Vec,PetscInt,VecScatter));
 
